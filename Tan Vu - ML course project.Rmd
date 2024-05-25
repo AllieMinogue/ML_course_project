@@ -1,0 +1,230 @@
+---
+title: "ML course project - PML movement prediction"
+author: "Tan Vu"
+date: "2024-05-15"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## A. Sypnosis
+
+This project aims to establish a machine learning model in order to predict the manner in which we do barbell lift exercise. The predictors to be used are the data obtained by accelerometers on the belt, forearm, arm and dumbell. The process can be briefed in to below steps:
+
+- Using the raw data provided by the project assignment, first I remove variables that are not fully available across all observations.
+
+- Next comes the exploratory analysis to identify the association between the available set of variable and the label (classe variable). This analysis is premise to shortlist the features for my machine learning model.
+
+- Next comes the machine learning model buildup. Here I use cross validation to validate model performance. Random Forest is the better model, thus my chosen model for this assignment.
+
+## B. Pre-processing & exploratory analysis
+
+### 1. Loading data
+
+```{r, results="hide", warning=FALSE, message=FALSE}
+trainurl <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+testurl <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+download.file(trainurl,destfile = "pmlTrain.csv",method = "curl")
+download.file(testurl,destfile = "pmlTest.csv",method = "curl")
+pmlTrain <- read.csv("./pmlTrain.csv",na.strings = "NA")
+pmlTest <- read.csv("./pmlTest.csv",na.strings = "NA")
+
+library(caret)
+library(ggplot2)
+library(dplyr)
+library(purrr)
+library(tidyr)
+library(broom)
+library(randomForest)
+
+set.seed(1611)
+```
+
+### 2. Exploratory analysis
+
+```{r, results="hide", warning=FALSE, message=FALSE}
+# I'm hiding the results here since it's long & you should be familiar with it too
+
+dim(pmlTrain)
+str(pmlTrain)
+head(pmlTrain, n = 10)
+```
+
+First quick check reveals a bunch of NA observations, so let's see how many NA values for each column
+
+```{r, results="hide", warning=FALSE, message=FALSE}
+count_missing <- function(x){
+    sum(is.na(x) | x == "")
+}
+missing_counts <- sapply(pmlTrain,count_missing)
+missing_counts
+```
+
+Above tells us that lots of column have the same amount of missing observations. & with a scroll through first hundreds of rows I see those observations with Yes value in new_window column would have those bunch of missing valuables.
+
+Glancing at the test dataset I found those bunch of columns with missing values also, & for all observations. My guess is those column between train & test sets are the same. Let's check it.
+
+```{r, warning = FALSE}
+missing_counts_test <- sapply(pmlTest,count_missing)
+missing_counts_test
+```
+
+So those columns with missing values are the same between train & test dataset. Therefore it's safe to remove thosoe columns fromm train dataset
+
+```{r, warning = FALSE}
+pmlTrain1 <- pmlTrain[,missing_counts == 0]
+dim(pmlTrain1)
+```
+
+Next let's see the observation number of each classe within the training dataset
+
+```{r, warning = FALSE}
+table(pmlTrain1$classe)
+```
+
+The observation amount here should be fine to split the training set into a training set & a validation set.
+
+```{r}
+# Also here I transform classe variable into factors
+pmlTrain1$classe <- as.factor(pmlTrain1$classe)
+
+# Group up those variables that I'm quite confident have no impact on classe, i.e no chance of being a feature. I'm not so sure about "num_window" variable, seems not a metric measured by a tracking device, I retain it in remaining variables to be filtered more since it's numerical.
+
+nonFeatures <- c("X","user_name","raw_timestamp_part_1","raw_timestamp_part_2","cvtd_timestamp","new_window")
+```
+
+Next understanding that our label (classe) are factors, while remaining variables are numerical or integer, I try plotting the average values for those variables by classe. & since absolute values of remaining variables (except the label) are quite different, I need to standardize their values before putting up a plot.
+
+```{r, warning = FALSE, message = FALSE}
+pmlTrain1_filtered <- pmlTrain1 %>%
+    select(-nonFeatures)
+
+pmlTrain1_standardized <- pmlTrain1_filtered %>%
+    mutate(across(-classe, ~ (.- mean(.)) / sd(.), .names = "std_{.col}"))
+
+pmlTrain1_long <- pmlTrain1_standardized %>%
+    pivot_longer(cols = starts_with("std_"), names_to = "variable", values_to = "value")
+
+pmlTrain1_summary <- pmlTrain1_long %>%
+    group_by(variable, classe) %>%
+    summarize(mean_value = mean(value, na.rm = TRUE)) %>%
+    ungroup()
+
+ggplot(pmlTrain1_summary, aes(x = variable, y = mean_value, color = classe)) +
+    geom_point() +
+    labs(x = "Variables", y = "Standardized Average Value", title = "Standardized Average Values of Variables by Classe") +
+    theme(axis.text.x = element_text(angle = 90, hjust = 1), legend.position = "bottom")
+```
+
+I can observe from the plot that lots of variables have the average standardized values based on classe separated from each other, & different from 0, suggesting those variables are associated with classe. Example include: accel_arm_x, accel_dumbell_x, magnet_arm_x, etc.
+
+Meanwhile, other variables have the average standardized values based on classe clustered together & close to 0, suggesting those variables are less useful in predicting classe.
+
+## C. Building up prediction model
+
+### 1. Shortlist the features
+
+Based on the observation in exploratory analysis, I move on to see explore which features should be selected in the machine learning model, based on their impact on classe statistically.
+
+```{r}
+# Function to perform ANOVA and return the p-value
+anova_pvalue <- function(feature) {
+    anova_result <- aov(value ~ classe, data = feature)
+    p_value <- summary(anova_result)[[1]][["Pr(>F)"]][1]
+    return(p_value)
+}
+
+# Reshape data to long format for ANOVA
+trainLong <- pmlTrain1_filtered %>%
+    pivot_longer(cols = -classe, names_to = "variable", values_to = "value")
+
+# Group by variable and apply ANOVA
+anova_results <- trainLong %>%
+    group_by(variable) %>%
+    nest() %>%
+    mutate(p_value = map_dbl(data, anova_pvalue))
+
+# Filter results to keep only significant features (e.g., p-value < 0.05)
+significant_features <- anova_results %>%
+  filter(p_value < 0.05)
+```
+
+So I've filtered out those 47 variables that should have significant impact on classe. Next is to establish the training dataset consisting of such 47 variables
+
+```{r}
+# Extract the names of the significant variables
+significant_vars <- significant_features$variable
+
+# Create a new dataset with only the significant variables and the label
+pmlTrain1_final <- pmlTrain1_filtered %>%
+    select(classe, all_of(significant_vars))
+```
+
+### 2. Cross-validation: split the data
+
+For cross-validation purpose, I further split the training set into a training set & a validation set
+
+```{r}
+inTrain <- createDataPartition(pmlTrain1_final$classe,p = 0.7, list = FALSE)
+
+trainFinal <- pmlTrain1_final[inTrain,]
+valFinal <- pmlTrain1_final[-inTrain,]
+```
+
+### 3. Prediction model buildup
+
+Here using cross validation, I'm trying to see which prediction model provides the best prediction result
+
+```{r}
+train_control <- trainControl(method = "cv", number = 3)
+```
+
+#### a. Mutinom to begin with
+
+```{r, results="hide", warning=FALSE, message=FALSE}
+logModel <- train(
+  classe ~ ., 
+  data = trainFinal, 
+  method = "multinom", 
+  trControl = train_control
+)
+```
+
+Let's see how good this model is when predicting with the validation dataset
+
+```{r}
+logValPred <- predict(logModel,newdata = valFinal)
+logCM <- confusionMatrix(logValPred,valFinal$classe)
+print(logCM)
+```
+
+Accuracy of 68.16% is not so impressive. Probably the type of our dataset (categorical label & multiple other numerical predictors) is not suitable for logistic regression.
+
+#### b. Next is Random Forest
+
+```{r, results="hide", warning=FALSE, message=FALSE}
+rfModel <- train(classe ~ .,data = trainFinal,method = "rf",trControl = train_control,importance = TRUE)
+```
+
+Again I check how this works with the validation dataset
+
+```{r}
+rfValPred <- predict(rfModel,newdata = valFinal)
+rfCM <- confusionMatrix(rfValPred,valFinal$classe)
+print(rfCM)
+```
+
+99.83% accuracy is whooping no ? So I can expect out of sample error is > 0.17% . But I guess 99.83% accuracy with validation dataset is decent enough to move forward.
+
+## D. Prediction
+
+I'll use Random Forest model to predict with the test dataset
+
+```{r}
+testFinal <- pmlTest %>%
+    select(all_of(significant_vars))
+rfPred <- predict(rfModel,newdata = testFinal)
+print(rfPred)
+```

@@ -1,0 +1,4 @@
+"0","inTrain <- createDataPartition(pmlTrain1_final$classe,p = 0.7, list = FALSE)
+"
+"2","Error: object 'pmlTrain1_final' not found
+"
